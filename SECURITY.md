@@ -8,10 +8,11 @@ fix ships as a new version that existing installs pick up automatically.
 
 | Version    | Supported |
 | ---------- | --------- |
-| 1.6.16     | Yes       |
-| < 1.6.16   | No        |
+| 1.6.17     | Yes       |
+| < 1.6.17   | No        |
 
-Your installed version is shown at the bottom of the settings panel.
+Your installed version is shown beside the word Settings, at the top of
+Settings.
 
 ## Reporting a vulnerability
 
@@ -35,6 +36,10 @@ Worth stating plainly, because the permissions are broad by necessity:
   userscript manager. Since 1.6.14 that includes frames inside those pages;
   everywhere except the reader's own article frame on backchnnl.app it stops on
   its first statement.
+- **It listens for one key on every page.** Since 1.6.17, ⌘. (Ctrl+. off Apple
+  platforms), or the key you set in Settings › Shortcuts, shows or hides the
+  Sidebar. Every other key is left to the page, typing in a field included,
+  and no key is kept or sent anywhere.
 - **It can make cross-origin requests**, via `GM.xmlHttpRequest`, restricted by
   the `@connect` header. Which hosts it *actually* contacts depends on which
   comment sources you have enabled, and on the topics you pick for the front
@@ -48,15 +53,15 @@ Worth stating plainly, because the permissions are broad by necessity:
   | Bluesky (discovery) | `constellation.microcosm.blue` | the URL of each page you visit, with no identifier attached |
   | Bluesky | `public.api.bsky.app` | post identifiers only -- never the URL of the page you are on |
   | Lobsters | `lobste.rs` | the domain of each page you visit -- never the full address. It has no URL search, so the exact match is made here |
-  | Wikipedia | `en.wikipedia.org` | the URL of each page you visit, to find the Talk pages citing it, and then those pages' names to read what was said. No account, signed in or out |
+  | Wikipedia | `en.wikipedia.org` | the URL of each page you visit, to find the Talk pages citing it, and then those pages' names to read what was said. Signed in to Wikipedia, these requests carry your session; signed out, they carry a device identifier that lasts a year |
   | Lemmy | `lemmy.world` | the URL of each page you visit, with no account |
   | Mastodon (discovery) | `www.tootfinder.ch` | the domain of each page you visit -- never the full address. An opt-in index of Mastodon posts, not Mastodon, and it holds only people who chose to be searchable |
-  | Mastodon (front page) | `mastodon.social` | nothing about you. Asked only what that instance is currently linking to |
+  | Mastodon (front page) | `mastodon.social` | what that instance is currently linking to and, when you open one of those links in the reader and the search finds no posts for it, that link's address, to find the posts sharing it |
   | Front Pages, by topic | `www.reddit.com`, `news.ycombinator.com`, `lemmy.world`, `lobste.rs` and `public.api.bsky.app`, each only while that source is on | nothing about the page you are on, only the topics you picked. Signed in to Reddit or Hacker News, those requests arrive as your account |
   | Hypothes.is | `api.hypothes.is` | the URL of each page you visit, to find public annotations on it. No account, signed in or out |
   | *no source enabled* | none | nothing -- the script performs no lookup at all. Kind of weird to use it this way, but no judgements. |
 
-  Seven sit outside that table because they are not lookups:
+  Nine sit outside that table because they are not lookups:
 
   | Host | When | What it is told |
   | --- | --- | --- |
@@ -65,9 +70,23 @@ Worth stating plainly, because the permissions are broad by necessity:
   | the page you open in the reader on backchnnl.app | only when that page gives no answer from inside its frame | nothing but the request itself: one `GET` without cookies, to read whether it may be framed, whether it is a picture and, if it may not be framed, its text |
   | the site of each article in the reader's list on backchnnl.app | when the list shows the article, since 1.6.15 | nothing but a request for its icon, `/favicon.ico`, sent without a referrer |
   | wherever a page you open in the reader says its preview image is | once that page has loaded in the reader, since 1.6.15.1 | nothing but the request for the image, sent without a referrer |
+  | the site of each page in your Collection | when the Collection shows a card that has no picture or colors kept for its page, since 1.6.17: at most six at a time, and each card once until the page reloads | nothing but the request itself: one `GET` without cookies, to read the page's picture, colors, fonts and icon |
+  | wherever a page in your Collection says its picture and icon are | when the Collection shows its card, in the reader or in the Sidebar, since 1.6.17 | nothing but the requests for the images, sent without a referrer |
   | wherever an image in a comment is hosted | only with *Show images in comments* on, and it is off until you turn it on | nothing but the request for the image, over https and without a referrer |
   | the page you ask the reader to scrape | only when you press *Scrape link content* | what any visit tells it: the page opens in a tab of your own browser, signed in if you are |
 
+- **It checks the pages in your Collection for new discussion.** Since 1.6.17
+  every page you save is watched until you choose *Unwatch* in its card's
+  menu; before, only what you chose to watch was. A page is checked once when
+  you save it, to note how many posts link to it. After that, each time a page
+  you visit is looked up, up to four saved pages not checked in the past hour
+  are. A check sends the saved page's address to Hacker News's search, to
+  Constellation and, while Reddit answers through its archive mirror, to that
+  mirror -- only those you have on -- and asks how many posts link to it. When
+  a count has grown, the saved page is looked up as a page you visit is, by
+  every source you have on. A page with new discussion is not checked again
+  until you have seen it, and one that no source answers five times running is
+  no longer checked.
 - **Enhanced PDF support downloads a copy of pdf.js.** The reader is
   [pdf.js](https://mozilla.github.io/pdf.js/), declared as two `@resource` files
   on `cdn.jsdelivr.net` -- 0.49 MiB for the viewer and 1.25 MiB for its worker,
@@ -99,8 +118,9 @@ Worth stating plainly, because the permissions are broad by necessity:
 - **It stores data locally** through `GM.getValue` / `GM.setValue` -- settings,
   per-site Sidebar widths, the zoom level of the last forty sites you visited,
   button position, collapsed threads, seen-comment timestamps, remembered votes
-  and favorites, your reading queue, the sites you have hidden, and anything you
-  write in the notepad. An article you ask the reader to scrape passes through
+  and your Collection, with each saved page's picture, colors and icon, your
+  reading queue, the sites you have hidden, and anything you write in the
+  notepad. An article you ask the reader to scrape passes through
   the same storage on its way from its tab: the reader removes it once it is
   shown, and if the reader has gone by then it stays until the next scrape
   replaces it. On backchnnl.app it also keeps your theme and the reader's two
@@ -159,9 +179,12 @@ Worth stating plainly, because the permissions are broad by necessity:
   except a frame named `backchannel-article` it stops on its first statement. In
   that frame, inside the reader on backchnnl.app, it answers only messages from
   `https://backchnnl.app`, and tells that page only the frame's address, its
-  title, its size, the address of its preview image, whether it is showing,
-  whether it is a picture, which quotes it found, which link was pressed, a
-  passage you pressed **Add note** on, and a pull down from the top of the page.
+  title, its size, the address of its preview image, its colors, fonts and
+  icon and its site's name (for its card in the Collection), whether it is
+  showing, whether it is a picture, which quotes it found, which link was
+  pressed, a passage you pressed **Add note** on, a pull down from the top of
+  the page, and a key you pressed in it when that key is one of the reader's
+  shortcuts and you were not typing in a field.
   It performs no lookup there and writes nothing to storage; it reads your
   settings to know whether to offer **Add note**. A page in that frame could
   send the reader a passage of its own choosing: the reader would open its note
@@ -189,7 +212,9 @@ Worth stating plainly, because the permissions are broad by necessity:
 
 One row per request the script can make, read from the code rather than described.
 `<page>` is the address of the page you are on; `<domain>` is only its host. A
-source you have not switched on issues none of these.
+source you have not switched on issues none of these. A page in your Collection
+that the watching rows find new discussion for is looked up by the same rows,
+with its address as `<page>`.
 
 | Source | Request | What it carries | Arrives as you? |
 | --- | --- | --- | --- |
@@ -203,8 +228,8 @@ source you have not switched on issues none of these.
 | Bluesky | `GET constellation.microcosm.blue/xrpc/blue.microcosm.links.getBacklinks?subject=<page>&source=...&limit=100` | `<page>` | No |
 | Bluesky | `GET public.api.bsky.app/xrpc/app.bsky.feed.getPosts` and `...getPostThread` | post ids Constellation named, never `<page>` | No. Signed in, the cookie jar for `bsky.app` is empty -- it authenticates from local storage, which the browser never attaches |
 | Lobsters | `GET lobste.rs/domains/<domain>.json` | `<domain>` only, never the full address | No |
-| Wikipedia | `GET en.wikipedia.org/w/api.php?action=query&list=exturlusage&eunamespace=1\|3\|4\|5&euquery=<page>&eulimit=100` | `<page>`, to find the Talk and project pages citing it | No |
-| Wikipedia | `GET en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=<titles>` | the names of those pages | No |
+| Wikipedia | `GET en.wikipedia.org/w/api.php?action=query&list=exturlusage&eunamespace=1\|3\|4\|5&euquery=<page>&eulimit=100` | `<page>`, to find the Talk and project pages citing it | Yes when signed in. `enwikiSession` is `SameSite=None`, so the browser attaches it cross-site. Signed in or out it carries `WMF-Uniq`, a device id Wikipedia sets on every visit, which lasts a year |
+| Wikipedia | `GET en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=<titles>` | the names of those pages | The same, as in the row above |
 | Lemmy | `GET lemmy.world/api/v3/search?q=<page>&type_=Url&listing_type=All&limit=20` | `<page>` | No |
 | Lemmy | `GET lemmy.world/api/v3/comment/list?post_id=<id>&type_=All&sort=Top&max_depth=8&limit=300` | a post id it already found | No |
 | Mastodon | `GET www.tootfinder.ch/rest/api/search/<domain>` | `<domain>` only, never the full address | No |
@@ -215,18 +240,33 @@ source you have not switched on issues none of these.
 | Front Pages, by topic | `GET lobste.rs/hottest.json` | nothing. Only for Technology, and only while Lobsters is on | No |
 | Front Pages, by topic | `GET public.api.bsky.app/xrpc/app.bsky.feed.getFeed?feed=<feed>&limit=100` | a feed for a topic you picked, never `<page>`. Only while Bluesky is on | No |
 | Hypothes.is | `GET api.hypothes.is/api/search?url=<page>&limit=200` | `<page>` | No |
+| Hacker News (Collection) | `GET hn.algolia.com/api/v1/items/<id>` | the id of a comment you saved without its thread, to find that thread; at most five tries, only while Hacker News is on | No |
+| Lobsters (Collection) | `GET lobste.rs/c/<id>.json`, then `GET lobste.rs/s/<id>.json` | the id of a comment you saved without its thread, then its story's id, to find the article; at most five tries, only while Lobsters is on | No. Its session cookie, `lobster_trap`, is `SameSite=Lax`, which the browser withholds cross-site |
+| Lemmy (Collection) | `GET lemmy.world/api/v3/comment?id=<id>` | the id of a comment you saved without its thread, to find its post; at most five tries, only while Lemmy is on | No. Its session cookie, `jwt`, is `SameSite=Lax`, which the browser withholds cross-site |
+| Hacker News (watching) | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=<saved page>&numericFilters=created_at_i><when you saved it>` | the address of a page in your Collection, in two spellings, and when you saved it, to count the stories posted since; only while Hacker News is on | No, and no identifier of any kind |
+| Bluesky (watching) | `GET constellation.microcosm.blue/links/count?target=<saved page>&collection=app.bsky.feed.post&path=.embed.external.uri` | the address of a page in your Collection, plus a `User-Agent` naming Backchannel and its version; only while Bluesky is on | No |
+| Reddit (watching) | `GET arctic-shift.photon-reddit.com/api/posts/search?limit=25&fields=id&url=<saved page>` | the address of a page in your Collection; only while Reddit is on and answering through the archive mirror | No identifier, no session |
+| Reddit (reader) | `GET www.reddit.com/api/info.json?id=t3_<id>`, or the archive mirror's `/api/posts/ids?ids=<id>` | the id of a post the reader listed, when you open its link and the search by address missed that post; only while Reddit is on | Yes when signed in, as in the Reddit row |
+| Bluesky (reader) | `GET public.api.bsky.app/xrpc/app.bsky.feed.getPosts?uris=<post>` | a post a Front Pages feed listed, when you open its link and the search by address missed it; only while Bluesky is on | No, as in the Bluesky row |
+| Lobsters (reader) | `GET lobste.rs/s/<id>.json` | the id of a story the reader listed, when you open its link and the search by domain missed it; only while Lobsters is on | No. Its session cookie, `lobster_trap`, is `SameSite=Lax`, which the browser withholds cross-site |
+| Mastodon (reader) | `GET mastodon.social/api/v1/timelines/link?url=<link>&limit=40` | a link mastodon.social's trends listed, when you open it and the search finds no posts for it; only while Mastodon is on | No. Its session cookie, `_mastodon_session`, is `SameSite=Lax`, which the browser withholds cross-site |
+| Lemmy (reader) | `GET lemmy.world/api/v3/post?id=<id>` | the id of a post the reader listed, when you open its link and the search by address missed it; only while Lemmy is on | No. Its session cookie, `jwt`, is `SameSite=Lax`, which the browser withholds cross-site |
 | backchnnl.app reader, not a source | `GET <the page you opened>`, only when it gives no answer from its frame | nothing but the request itself | No, it is sent without cookies |
 | backchnnl.app reader's list, not a source | `GET <article's site>/favicon.ico`, as an image, one for each article the list shows | nothing but the request itself, with no referrer | Only as far as your browser sends that site's cookies with an image on another site's page; browsers differ |
 | backchnnl.app reader's list, not a source | `GET <the preview image an opened page names>`, as an image, once that page has loaded in the reader | nothing but the request itself, with no referrer | The same: whatever cookies your browser sends with an image on another site's page |
+| Collection, not a source | `GET <a page in your Collection>`, when its card has no picture or colors kept, at most six at a time | nothing but the request itself | No, it is sent without cookies |
+| Collection, not a source | `GET <a saved page's picture>` and `GET <its icon>`, as images, when the Collection shows its card | nothing but the request itself, with no referrer | The same: whatever cookies your browser sends with an image on another site's page |
 | Images in comments, not a source | `GET <the image>`, for each https image in the comments shown, only with *Show images in comments* on | nothing but the request itself, with no referrer | The same: whatever cookies your browser sends with an image on another site's page |
 | Scrape link content, not a source | a tab on `<the page you asked for>`, only when you press the button | what any visit to that page carries | Yes. It is your browser opening the page, with the session you have there |
 | pdf.js, not a source | `GET cdn.jsdelivr.net/npm/pdfjs-dist@<version>/legacy/build/pdf.min.mjs` and `pdf.worker.min.mjs` | nothing about you, two fixed files at a pinned version | No |
 | no source enabled | none | nothing, no lookup is performed at all | -- |
 
-Two rows are worth reading twice. Reddit is the only source that learns who you
-are, which is why it is a checkbox rather than a default and why the caveat sits
-next to that checkbox; *Never contact Reddit directly* uses only the archive
-mirror row, which carries neither a session nor an identifier. Bluesky never
+Three rows are worth reading twice. Reddit learns who you are, which is why it
+is a checkbox rather than a default and why the caveat sits next to that
+checkbox; *Never contact Reddit directly* uses only the archive mirror row,
+which carries neither a session nor an identifier. Wikipedia is sent a device id
+that lasts a year, signed in or out, and your session when you are signed in to
+it. Bluesky never
 learns which page you are on -- Constellation does, and Bluesky is asked only
 about the posts Constellation named.
 
