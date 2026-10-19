@@ -8,8 +8,8 @@ fix ships as a new version that existing installs pick up automatically.
 
 | Version    | Supported |
 | ---------- | --------- |
-| 1.6.17     | Yes       |
-| < 1.6.17   | No        |
+| 1.6.17.1   | Yes       |
+| < 1.6.17.1 | No        |
 
 Your installed version is shown beside the word Settings, at the top of
 Settings.
@@ -125,8 +125,10 @@ Worth stating plainly, because the permissions are broad by necessity:
   shown, and if the reader has gone by then it stays until the next scrape
   replaces it. On backchnnl.app it also keeps your theme and the reader's two
   page colors in that site's own local storage, under `backchannel:chrome`, so
-  the page can take your color before the script runs. Nothing is sent
-  anywhere except the hosts above.
+  the page can take your color before the script runs and, since 1.6.17.1,
+  show the reader's frame instead of the promotion page while it loads. If the
+  reader has not appeared within four seconds, the page deletes that entry
+  itself. Nothing is sent anywhere except the hosts above.
 - **It keeps what Hacker News answered about the last pages you looked up**, so
   a page reopened within the hour is not asked about again. Since 1.6.15.2 that
   is one stored value holding thirty pages at most, by address. A page is used
@@ -166,9 +168,9 @@ Worth stating plainly, because the permissions are broad by necessity:
 - **Comment HTML is sanitized** before being inserted, through an allowlist of
   tags and attributes -- applied to every source. Reddit's rendered markdown
   arrives HTML-escaped and is unescaped only to be handed to the same sanitizer.
-  Lemmy hands over Markdown rather than HTML, which is escaped first and only
-  then turned into links and quotes, so the only markup in a Lemmy comment is
-  markup this script wrote. An image is not loaded: inside a link it becomes
+  Lemmy, and since 1.6.17.1 Reddit's archive mirror, hand over Markdown rather
+  than HTML, which is escaped first and only then turned into links and
+  quotes, so the only markup in those comments is markup this script wrote. An image is not loaded: inside a link it becomes
   the link's text, and anywhere else it is dropped. With *Show images in
   comments* on, an image with an https address is kept instead, stripped to
   its address and description and loaded lazily without a referrer; any

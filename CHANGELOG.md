@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.17.1] — 2026-10-19
+
+### Added
+
+- **backchnnl.app shows the reader's frame while the script loads.** A
+  browser that had opened the reader there before drew the promotion page
+  until the userscript arrived, then swapped it for the reader. The page now
+  starts in the reader's own color, with nothing else drawn, and the reader
+  appears in it. If the reader has not appeared within four seconds, the
+  promotion page shows and the page forgets the reader, so a browser without
+  the script does not wait again. A first visit shows the promotion page at
+  once, as before.
+
+### Fixed
+
+- **Reddit comments show their text again when Reddit is read through its
+  archive mirror.** When reddit.com declines a request, Backchannel asks an
+  archive mirror instead. The mirror sends each comment as Markdown, not as
+  the rendered HTML that was the only text read, so every comment from it
+  showed its author and age and nothing else, and a text post showed no body.
+  Both are now rendered from the Markdown, the way Lemmy's are.
+
+- **The article's buttons are desktop-sized in the stacked reader.** Below
+  1336px, where the discussion sits under the article, the stack at the
+  article's bottom right used the phone's 36px buttons beside the 24px Front
+  Pages button. With a mouse they now match it, icons included. Touch screens
+  keep the larger buttons.
+
 ## [1.6.17] — 2026-10-18
 
 ### Added
