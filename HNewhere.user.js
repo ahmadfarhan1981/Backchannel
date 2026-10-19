@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.17
+// @version      1.6.17.1
 // @license      MIT
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
 // @downloadURL  https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -3000,7 +3000,9 @@
 			permalink: "https://www.reddit.com" + (post.permalink || ""),
 			articleURL: post.url || "",
 			label: post.subreddit_name_prefixed || "r/" + (post.subreddit || ""),
-			bodyHTML: unescapeHTML(post.selftext_html),
+			bodyHTML: post.selftext_html
+				? unescapeHTML(post.selftext_html)
+				: markdownToHTML(post.selftext || ""),
 			rootKeys: [],
 			rootTimes: [],
 		};
@@ -3019,7 +3021,9 @@
 				? sourceKey("reddit", parent.slice(3))
 				: null,
 			author: data.author || "[deleted]",
-			bodyHTML: unescapeHTML(data.body_html),
+			bodyHTML: data.body_html
+				? unescapeHTML(data.body_html)
+				: markdownToHTML(data.body || ""),
 			score: data.score ?? null,
 			createdAt: data.created_utc ?? 0,
 			isOP: Boolean(data.is_submitter),
@@ -31283,6 +31287,23 @@ header .item-action-link {
 
 	#app-bar-view .app-view-glyph {
 		line-height:1;
+	}
+}
+
+@media (min-width: 701px) and (max-width: 1335px) and (pointer: fine) {
+	.app-stack-button {
+		width:24px;
+		height:24px;
+		border-radius:12px;
+	}
+
+	.app-stack-button svg {
+		width:15px;
+		height:15px;
+	}
+
+	#app-bar-discussion:has(.rail-badge:not(:empty)) {
+		height:34px;
 	}
 }
 
