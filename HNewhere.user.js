@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.17.1
+// @version      1.6.17.2
 // @license      MIT
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
 // @downloadURL  https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -41,6 +41,9 @@
 // @exclude      https://*.instagram.com/*
 // @grant        GM.getValue
 // @grant        GM.setValue
+// @grant        GM.deleteValue
+// @grant        GM.deleteValues
+// @grant        GM.listValues
 // @grant        GM.xmlHttpRequest
 // @grant        GM.getResourceText
 // @grant        unsafeWindow
@@ -215,6 +218,13 @@
 	const COLLECTED_LEGACY_KEY = "HNewhere:watches";
 	const COLLECTED_MIGRATED_KEY = "HNewhere:collected_migrated";
 
+	const SWEEP_KEY = "HNewhere:last_sweep";
+	const SWEEP_INTERVAL = 24 * 60 * 60 * 1000;
+	const SWEEP_DELAY = 10000;
+	const SWEEP_CACHE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+	const SEEN_FORGET_AFTER = 90 * 24 * 60 * 60;
+	const SITE_MAP_MAX = 200;
+
 	// #region hnewhere-test-export
 	const SOURCE_KEY_SEPARATOR = ":";
 
@@ -289,7 +299,7 @@
 	const VOTE_MEMORY_TTL = 90 * 24 * 60 * 60 * 1000;
 
 	// #region hnewhere-test-export
-	const BUTTON_SIZE_MIN = 24;
+	const BUTTON_SIZE_MIN = 4;
 	const BUTTON_SIZE_MAX = 64;
 	const BUTTON_SIZE_STEP = 4;
 	const BUTTON_SIZE_DEFAULT = 44;
@@ -311,12 +321,11 @@
 	const BUTTON_MARK_MAX = 2;
 
 	function normalizeButtonMark(value) {
-		const text = String(value ?? "")
-			.trim()
-			.slice(0, BUTTON_MARK_MAX)
-			.toUpperCase();
+		if (value === undefined || value === null) {
+			return BUTTON_MARK_DEFAULT;
+		}
 
-		return text || BUTTON_MARK_DEFAULT;
+		return String(value).trim().slice(0, BUTTON_MARK_MAX).toUpperCase();
 	}
 
 	function normalizeButtonSize(value) {
@@ -350,6 +359,31 @@
 
 	function buttonFontSizeFor(size) {
 		return Math.min(18, Math.max(9, Math.round(size * 0.3)));
+	}
+
+	const BUTTON_FIT_MARGIN = 2;
+
+	function buttonFitSize(halfW, halfH, radiusPercent, margin = BUTTON_FIT_MARGIN) {
+		const reach = Math.max(halfW, halfH) + margin;
+
+		for (let size = Math.ceil(reach * 2); size < 512; size += 1) {
+			const radius = (radiusPercent / 100) * size;
+			const straight = size / 2 - radius;
+			const dx = Math.max(0, halfW - straight);
+			const dy = Math.max(0, halfH - straight);
+
+			if ((dx === 0 && dy === 0) || Math.hypot(dx, dy) <= radius - margin) {
+				return size;
+			}
+		}
+
+		return 512;
+	}
+
+	function buttonGrowNudge(size, fit, radiusPercent) {
+		const radius = (Math.min(radiusPercent, 50) / 100) * fit;
+
+		return Math.max(0, Math.ceil(radius - size / 2 - (radius - 1) / Math.SQRT2));
 	}
 
 	let themePreference = "auto";
@@ -515,6 +549,42 @@
 			return await GM.getValue(key, fallback);
 		} catch {
 			return fallback;
+		}
+	}
+
+	async function forget(key) {
+		if (typeof GM.deleteValue === "function") {
+			await GM.deleteValue(key);
+			return;
+		}
+
+		await save(key, null);
+	}
+
+	async function forgetMany(keys) {
+		if (typeof GM.deleteValues === "function") {
+			await GM.deleteValues(keys);
+			return;
+		}
+
+		for (let i = 0; i < keys.length; i++) {
+			await forget(keys[i]);
+
+			if ((i + 1) % 100 === 0) {
+				await new Promise((resolve) => window.setTimeout(resolve, 0));
+			}
+		}
+	}
+
+	async function listKeys() {
+		if (typeof GM.listValues !== "function") {
+			return null;
+		}
+
+		try {
+			return await GM.listValues();
+		} catch {
+			return null;
 		}
 	}
 
@@ -2044,15 +2114,7 @@
 		}
 	}
 
-	async function loadSiteWidth() {
-		const widths = await load(STORAGE.widths, {});
-		const perSiteWidth =
-			widths && typeof widths === "object" ? widths[siteKey()] : undefined;
-
-		if (typeof perSiteWidth === "number" && Number.isFinite(perSiteWidth)) {
-			return perSiteWidth;
-		}
-
+	async function defaultSiteWidth() {
 		const savedWidth = await load(STORAGE.width, null);
 
 		if (typeof savedWidth === "number" && Number.isFinite(savedWidth)) {
@@ -2066,19 +2128,45 @@
 		return isMobile() ? Math.round((window.innerWidth * 0.75) / sidebarZoom) : 420;
 	}
 
+	async function loadSiteWidth() {
+		const widths = await load(STORAGE.widths, {});
+		const perSiteWidth =
+			widths && typeof widths === "object" ? widths[siteKey()] : undefined;
+
+		if (typeof perSiteWidth === "number" && Number.isFinite(perSiteWidth)) {
+			return perSiteWidth;
+		}
+
+		return defaultSiteWidth();
+	}
+
+	async function updateSiteMap(storageKey, site, value) {
+		const stored = await load(storageKey, {});
+		const next = {};
+
+		for (const [key, entry] of Object.entries(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {})) {
+			if (key !== site) {
+				next[key] = entry;
+			}
+		}
+
+		if (value !== undefined) {
+			next[site] = value;
+		}
+
+		for (const key of Object.keys(next).slice(0, -SITE_MAP_MAX)) {
+			delete next[key];
+		}
+
+		await save(storageKey, next);
+	}
+
 	async function saveSiteWidth(width) {
 		if (typeof width !== "number" || !Number.isFinite(width)) {
 			return;
 		}
 
-		const widths = await load(STORAGE.widths, {});
-		const nextWidths =
-			widths && typeof widths === "object" && !Array.isArray(widths)
-				? { ...widths }
-				: {};
-
-		nextWidths[siteKey()] = width;
-		await save(STORAGE.widths, nextWidths);
+		await updateSiteMap(STORAGE.widths, siteKey(), width === (await defaultSiteWidth()) ? undefined : width);
 	}
 
 	async function loadSidebarState() {
@@ -2094,14 +2182,7 @@
 			return;
 		}
 
-		const states = await load(STORAGE.state, {});
-		const nextStates =
-			states && typeof states === "object" && !Array.isArray(states)
-				? { ...states }
-				: {};
-
-		nextStates[siteKey()] = state;
-		await save(STORAGE.state, nextStates);
+		await updateSiteMap(STORAGE.state, siteKey(), state === "open" ? "open" : undefined);
 	}
 
 	// -------------------------
@@ -4327,7 +4408,7 @@
 
 	function discussionURL(story) {
 		if (story?.permalink) {
-			return story.permalink;
+			return /^https?:\/\//i.test(story.permalink) ? story.permalink : null;
 		}
 
 		return story?.source ? null : commentURL(story?.id);
@@ -6662,7 +6743,7 @@ button {
 				return [];
 			}
 
-			return links.filter((link) => link?.url).map(mastodonTrendStory);
+			return links.filter((link) => isOffSiteLink(link?.url)).map(mastodonTrendStory);
 		},
 
 		async recover(story) {
@@ -6982,6 +7063,7 @@ button {
 	const DISCOVERY_CACHE_KEY = "HNewhere:discovery_cache";
 	const DISCOVERY_CACHE_TTL = 60 * 60 * 1000;
 	const DISCOVERY_CACHE_MAX = 30;
+	const DISCOVERY_HIT_FIELDS = ["objectID", "title", "author", "points", "num_comments", "created_at_i", "url", "story_text"];
 
 	function keptDiscoveries(stored, now) {
 		const held = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
@@ -7056,6 +7138,18 @@ button {
 		});
 	}
 
+	function discoveryHit(item) {
+		const hit = {};
+
+		for (const field of DISCOVERY_HIT_FIELDS) {
+			if (item[field] !== undefined) {
+				hit[field] = item[field];
+			}
+		}
+
+		return hit;
+	}
+
 	async function findHN(url) {
 		const target = normalizeURL(url);
 
@@ -7089,7 +7183,7 @@ button {
 
 			for (const item of result.hits) {
 				if (normalizeURL(item.url) === target) {
-					matches.set(item.objectID, item);
+					matches.set(item.objectID, discoveryHit(item));
 				}
 			}
 		}
@@ -8719,6 +8813,132 @@ html[data-backchannel-installed] .chin {
 		}
 	}
 
+	const BUTTON_LABEL_STYLE = {
+		display: "block",
+		flex: "none",
+		position: "static",
+		margin: "0",
+		padding: "0",
+		border: "0",
+		background: "none",
+		boxShadow: "none",
+		width: "auto",
+		height: "auto",
+		minWidth: "0",
+		maxWidth: "none",
+		minHeight: "0",
+		maxHeight: "none",
+		float: "none",
+		lineHeight: "1",
+		letterSpacing: "normal",
+		wordSpacing: "normal",
+		textTransform: "none",
+		textIndent: "0",
+		textDecoration: "none",
+		textAlign: "center",
+		whiteSpace: "nowrap",
+		boxSizing: "border-box",
+		color: "inherit",
+		fontFamily: "inherit",
+		fontSize: "inherit",
+		fontStyle: "inherit",
+		fontWeight: "inherit",
+		pointerEvents: "none",
+		transformOrigin: "50% 50%",
+	};
+
+	const buttonInkCache = new Map();
+	let buttonInkContext = null;
+
+	function buttonLabelFit(text, radius = buttonRadiusPreference, fontSize = 9) {
+		if (!text) {
+			return 0;
+		}
+
+		const key = `${fontSize}|${text}`;
+		let ink = buttonInkCache.get(key);
+
+		if (!ink) {
+			buttonInkContext ??= document.createElement("canvas").getContext("2d");
+			buttonInkContext.font = `bold ${fontSize}px Verdana, sans-serif`;
+			buttonInkContext.textAlign = "center";
+			buttonInkContext.textBaseline = "middle";
+
+			const m = buttonInkContext.measureText(text);
+
+			ink = {
+				halfW: Math.max(m.actualBoundingBoxLeft, m.actualBoundingBoxRight),
+				halfH: Math.max(m.actualBoundingBoxAscent, m.actualBoundingBoxDescent),
+			};
+			buttonInkCache.set(key, ink);
+		}
+
+		return buttonFitSize(ink.halfW, ink.halfH, radius);
+	}
+
+	function syncButtonGrowth(button) {
+		const label = button._label;
+
+		if (!label) {
+			return;
+		}
+
+		const size = buttonSizePreference;
+		const fit = buttonLabelFit(
+			label.textContent,
+			buttonRadiusPreference,
+			Number.parseFloat(button.style.fontSize) || 9,
+		);
+		const grown = Boolean(button._hovered || button._focused);
+		const box = `${grown && fit > size ? fit : size}px`;
+
+		pinButtonStyle(button, { width: box, height: box });
+
+		if (!fit) {
+			pinButtonStyle(button, {
+				transformOrigin: "50% 50%",
+				transform: grown ? `scale(${(size + 4) / size})` : null,
+			});
+			pinButtonStyle(label, { visibility: "visible", transform: null });
+			return;
+		}
+
+		if (fit <= size) {
+			pinButtonStyle(button, {
+				transformOrigin: "50% 50%",
+				transform: grown ? "scale(1.06)" : null,
+			});
+			pinButtonStyle(label, { visibility: "visible", transform: null });
+			return;
+		}
+
+		pinButtonStyle(label, { visibility: grown ? "visible" : "hidden", transform: null });
+
+		if (!grown) {
+			pinButtonStyle(button, { transform: null });
+			return;
+		}
+
+		const nudge = buttonGrowNudge(size, fit, buttonRadiusPreference);
+		const { corner } = buttonCornerPlacement(button);
+
+		pinButtonStyle(button, {
+			transform: nudge
+				? `translate(${corner.endsWith("right") ? nudge : -nudge}px, ${corner.startsWith("bottom") ? nudge : -nudge}px)`
+				: null,
+		});
+	}
+
+	function setButtonLabel(button, text) {
+		const label = document.createElement("span");
+
+		label.textContent = text;
+		pinButtonStyle(label, BUTTON_LABEL_STYLE);
+		button._label = label;
+		button.replaceChildren(label);
+		syncButtonGrowth(button);
+	}
+
 	const BUTTON_STYLE_RESET = {
 		margin: "0",
 		border: "0",
@@ -8743,13 +8963,13 @@ html[data-backchannel-installed] .chin {
 	function applyButtonAppearance(button) {
 		const size = buttonSizePreference;
 
-		button.textContent = buttonMarkPreference;
 		pinButtonStyle(button, {
 			width: `${size}px`,
 			height: `${size}px`,
 			fontSize: `${buttonFontSizeFor(size)}px`,
 			borderRadius: `${buttonRadiusPreference}%`,
 		});
+		setButtonLabel(button, buttonMarkPreference);
 	}
 
 	async function refreshButtonAppearance() {
@@ -8801,8 +9021,6 @@ html[data-backchannel-installed] .chin {
 			alignItems: "center",
 			justifyContent: "center",
 			color: "white",
-			top: "16px",
-			right: "16px",
 		});
 
 		button.style.opacity = "1";
@@ -8819,7 +9037,7 @@ html[data-backchannel-installed] .chin {
 		let button = document.getElementById(id);
 
 		if (button) {
-			button.textContent = buttonMarkPreference;
+			setButtonLabel(button, buttonMarkPreference);
 			return button;
 		}
 
@@ -8827,14 +9045,14 @@ html[data-backchannel-installed] .chin {
 
 		if (button) {
 			button.id = id;
-			button.textContent = buttonMarkPreference;
+			setButtonLabel(button, buttonMarkPreference);
 			setFloatingButtonVariant(button, variant);
 			return button;
 		}
 
 		button = document.createElement("button");
 		button.id = id;
-		button.textContent = buttonMarkPreference;
+		setButtonLabel(button, buttonMarkPreference);
 
 		pinButtonStyle(button, {
 			...BUTTON_STYLE_RESET,
@@ -8852,7 +9070,7 @@ html[data-backchannel-installed] .chin {
 			display: "flex",
 			alignItems: "center",
 			justifyContent: "center",
-			transition: "background .2s ease, box-shadow .2s ease, transform .15s ease",
+			transition: "background .2s ease, box-shadow .2s ease, width .15s ease, height .15s ease, transform .15s ease",
 			overflow: "hidden",
 			isolation: "isolate",
 		});
@@ -8865,24 +9083,42 @@ html[data-backchannel-installed] .chin {
 
 		setFloatingButtonVariant(button, variant);
 
-		button.addEventListener("mouseenter", () => {
-			pinButtonStyle(button, { transform: "scale(1.06)" });
-		});
-		button.addEventListener("mouseleave", () => {
-			pinButtonStyle(button, { transform: null });
-		});
-
-		const updateButtonStyle = () => {
-			applyButtonMobileStyle(button);
+		const setGrown = (key, on) => {
+			button[key] = on;
+			syncButtonGrowth(button);
 		};
 
-		updateButtonStyle();
-		window.addEventListener("resize", updateButtonStyle);
+		const leaveWhenOutside = (event) => {
+			const box = button.getBoundingClientRect();
+
+			if (
+				event.clientX >= box.left &&
+				event.clientX <= box.right &&
+				event.clientY >= box.top &&
+				event.clientY <= box.bottom
+			) {
+				return false;
+			}
+
+			window.removeEventListener("pointermove", leaveWhenOutside, true);
+			setGrown("_hovered", false);
+			return true;
+		};
+
+		button.addEventListener("mouseenter", () => setGrown("_hovered", true));
+		button.addEventListener("mouseleave", (event) => {
+			if (!leaveWhenOutside(event)) {
+				window.addEventListener("pointermove", leaveWhenOutside, true);
+			}
+		});
+		button.addEventListener("focus", () =>
+			setGrown("_focused", button.matches(":focus-visible")),
+		);
+		button.addEventListener("blur", () => setGrown("_focused", false));
+		button.addEventListener("pointerup", () => syncButtonGrowth(button));
+
+		applyButtonMobileStyle(button);
 		document.body.appendChild(button);
-
-		button._cleanup = () => {
-			window.removeEventListener("resize", updateButtonStyle);
-		};
 
 		return button;
 	}
@@ -9015,7 +9251,7 @@ html[data-backchannel-installed] .chin {
 		}
 
 		if (Number.isFinite(stored.ts) && Date.now() - stored.ts > BRIDGE_PAYLOAD_TTL) {
-			await save(BRIDGE_PAYLOAD_PREFIX + nonce, null);
+			await forget(BRIDGE_PAYLOAD_PREFIX + nonce);
 			return null;
 		}
 
@@ -9023,7 +9259,7 @@ html[data-backchannel-installed] .chin {
 	}
 
 	async function clearBridgePayload(nonce) {
-		await save(BRIDGE_PAYLOAD_PREFIX + nonce, null);
+		await forget(BRIDGE_PAYLOAD_PREFIX + nonce);
 	}
 
 	async function sweepBridgePayloads() {
@@ -9042,8 +9278,8 @@ html[data-backchannel-installed] .chin {
 			}
 
 			if (Number.isFinite(entry.ts) && now - entry.ts > BRIDGE_PAYLOAD_TTL) {
-				await save(BRIDGE_PAYLOAD_PREFIX + entry.nonce, null);
-				await save(BRIDGE_RESULT_PREFIX + entry.nonce, null);
+				await forget(BRIDGE_PAYLOAD_PREFIX + entry.nonce);
+				await forget(BRIDGE_RESULT_PREFIX + entry.nonce);
 				continue;
 			}
 
@@ -9053,6 +9289,196 @@ html[data-backchannel-installed] .chin {
 		if (kept.length !== index.length) {
 			await save(BRIDGE_PAYLOAD_PREFIX + "index", kept);
 		}
+	}
+
+	function staleStorageKeys(values, now, done) {
+		const stale = [];
+		const oldKeys = new Set(Object.values(OLD_STORAGE));
+
+		for (const [key, value] of values) {
+			if (oldKeys.has(key)) {
+				if (done.migrated && done.seeded) {
+					stale.push(key);
+				}
+			} else if (!key.startsWith("HNewhere:")) {
+				continue;
+			} else if (key.startsWith("HNewhere:hn_cache:") || key === "HNewhere:item_actions") {
+				stale.push(key);
+			} else if (key === COLLECTED_LEGACY_KEY) {
+				if (done.collected) {
+					stale.push(key);
+				}
+			} else if (value === null) {
+				stale.push(key);
+			} else if (key.startsWith("HNewhere:comment_draft:")) {
+				if (value === "") {
+					stale.push(key);
+				}
+			} else if (key.startsWith(FRONT_PAGE_CACHE_KEY) || key.startsWith(FRONT_PAGE_FEED_KEY)) {
+				if (Number.isFinite(value?.timestamp) && now - value.timestamp > SWEEP_CACHE_MAX_AGE) {
+					stale.push(key);
+				}
+			}
+		}
+
+		return stale;
+	}
+
+	function pruneSeenTimes(seen, nowSeconds) {
+		if (!seen || typeof seen !== "object" || Array.isArray(seen)) {
+			return null;
+		}
+
+		const next = {};
+		let dropped = false;
+
+		for (const [key, value] of Object.entries(seen)) {
+			if (typeof value === "number" && nowSeconds - value > SEEN_FORGET_AFTER) {
+				dropped = true;
+			} else {
+				next[key] = value;
+			}
+		}
+
+		return dropped ? next : null;
+	}
+
+	function pruneSiteMap(map, keep) {
+		if (!map || typeof map !== "object" || Array.isArray(map)) {
+			return null;
+		}
+
+		const next = {};
+
+		for (const [key, value] of Object.entries(map)) {
+			if (!keep || keep(value)) {
+				next[key] = value;
+			}
+		}
+
+		const keys = Object.keys(next);
+
+		for (const key of keys.slice(0, -SITE_MAP_MAX)) {
+			delete next[key];
+		}
+
+		return Object.keys(next).length === Object.keys(map).length ? null : next;
+	}
+
+	async function sweepStorage() {
+		const now = Date.now();
+		const last = await load(SWEEP_KEY, 0);
+
+		if (Number.isFinite(last) && now - last < SWEEP_INTERVAL) {
+			return;
+		}
+
+		await save(SWEEP_KEY, now);
+
+		const keys = await listKeys();
+
+		if (keys) {
+			const oldKeys = new Set(Object.values(OLD_STORAGE));
+			const readFirst = [
+				BRIDGE_PAYLOAD_PREFIX,
+				BRIDGE_RESULT_PREFIX,
+				"HNewhere:comment_draft:",
+				FRONT_PAGE_CACHE_KEY,
+				FRONT_PAGE_FEED_KEY,
+				STORAGE.pendingFocus,
+				STORAGE.readOut,
+				STORAGE.last,
+			];
+			const values = new Map();
+			const wanted = keys.filter((key) => key.startsWith("HNewhere:") || oldKeys.has(key));
+
+			for (let i = 0; i < wanted.length; i++) {
+				const key = wanted[i];
+
+				values.set(key, readFirst.some((prefix) => key.startsWith(prefix)) ? await load(key, undefined) : undefined);
+
+				if ((i + 1) % 50 === 0) {
+					await new Promise((resolve) => window.setTimeout(resolve, 0));
+				}
+			}
+
+			const done = {
+				migrated: Boolean(await load("HNewhere:migrated", false)),
+				seeded: Boolean(await load(SOURCE_SEED_MIGRATION, false)),
+				collected: Boolean(await load(COLLECTED_MIGRATED_KEY, false)),
+			};
+			const stale = staleStorageKeys(values, now, done);
+
+			if (stale.length) {
+				await forgetMany(stale);
+			}
+		}
+
+		const seen = pruneSeenTimes(await load(STORAGE.seen, {}), Math.floor(now / 1000));
+
+		if (seen) {
+			await save(STORAGE.seen, seen);
+		}
+
+		const states = pruneSiteMap(await load(STORAGE.state, {}), (value) => value === "open");
+
+		if (states) {
+			await save(STORAGE.state, states);
+		}
+
+		const widths = pruneSiteMap(await load(STORAGE.widths, {}));
+
+		if (widths) {
+			await save(STORAGE.widths, widths);
+		}
+	}
+
+	function isCacheKey(key) {
+		return (
+			key === DISCOVERY_CACHE_KEY ||
+			key === REDDIT_TIER_KEY ||
+			key === "HNewhere:item_actions" ||
+			Object.values(OLD_STORAGE).includes(key) ||
+			key.startsWith(FRONT_PAGE_CACHE_KEY) ||
+			key.startsWith(FRONT_PAGE_FEED_KEY) ||
+			key.startsWith(AUTH_PREFIX) ||
+			key.startsWith("HNewhere:hn_cache:")
+		);
+	}
+
+	async function clearCache() {
+		const listed = await listKeys();
+		const keys = listed
+			? []
+			: [DISCOVERY_CACHE_KEY, REDDIT_TIER_KEY, FRONT_PAGE_CACHE_KEY, "HNewhere:item_actions", ...Object.values(OLD_STORAGE)];
+
+		for (const key of listed || []) {
+			if (isCacheKey(key)) {
+				keys.push(key);
+			} else if (
+				(key.startsWith(BRIDGE_PAYLOAD_PREFIX) || key.startsWith(BRIDGE_RESULT_PREFIX)) &&
+				(await load(key, undefined)) === null
+			) {
+				keys.push(key);
+			}
+		}
+
+		if (keys.length) {
+			await forgetMany(keys);
+		}
+	}
+
+	function scheduleStorageSweep() {
+		window.setTimeout(() => {
+			const run = () => sweepStorage().catch(console.error);
+
+			if (typeof requestIdleCallback === "function") {
+				requestIdleCallback(run, { timeout: 5000 });
+				return;
+			}
+
+			setTimeout(run, 0);
+		}, SWEEP_DELAY);
 	}
 
 	async function indexBridgePayload(nonce) {
@@ -9145,7 +9571,7 @@ html[data-backchannel-installed] .chin {
 			const stored = await load(BRIDGE_RESULT_PREFIX + nonce, null);
 
 			if (stored && !stopped) {
-				await save(BRIDGE_RESULT_PREFIX + nonce, null);
+				await forget(BRIDGE_RESULT_PREFIX + nonce);
 				deliver(stored);
 			}
 
@@ -9158,7 +9584,7 @@ html[data-backchannel-installed] .chin {
 
 		return () => {
 			stopped = true;
-			save(BRIDGE_RESULT_PREFIX + nonce, null).catch(() => {});
+			forget(BRIDGE_RESULT_PREFIX + nonce).catch(() => {});
 		};
 	}
 
@@ -10799,9 +11225,7 @@ html[data-backchannel-installed] .chin {
 	const BUTTON_EDGE_MARGIN = 4;
 
 	function buttonBounds(button) {
-		const doc = document.documentElement;
-		const width = doc.clientWidth || window.innerWidth;
-		const height = doc.clientHeight || window.innerHeight;
+		const { width, height } = buttonViewport();
 
 		return {
 			minX: BUTTON_EDGE_MARGIN,
@@ -10826,17 +11250,71 @@ html[data-backchannel-installed] .chin {
 		};
 	}
 
-	async function applyButtonPosition(button) {
-		const saved = await load(STORAGE.position, null);
+	function buttonViewport() {
+		const doc = document.documentElement;
 
-		if (!saved) {
-			pinButtonStyle(button, { left: null, top: "16px", right: "16px" });
+		return {
+			width: doc.clientWidth || window.innerWidth,
+			height: doc.clientHeight || window.innerHeight,
+		};
+	}
+
+	function buttonCornerPlacement(button) {
+		const { width, height } = buttonViewport();
+		const left = button.offsetLeft;
+		const top = button.offsetTop;
+		const right = left + button.offsetWidth / 2 > width / 2;
+		const bottom = top + button.offsetHeight / 2 > height / 2;
+
+		return {
+			corner: `${bottom ? "bottom" : "top"}-${right ? "right" : "left"}`,
+			x: right ? width - left - button.offsetWidth : left,
+			y: bottom ? height - top - button.offsetHeight : top,
+		};
+	}
+
+	function pinButtonPlacement(button, placement) {
+		const { x, y } = clampButtonToViewport(button, placement.x, placement.y);
+		const right = placement.corner.endsWith("right");
+		const bottom = placement.corner.startsWith("bottom");
+
+		pinButtonStyle(button, {
+			left: right ? "auto" : x + "px",
+			right: right ? x + "px" : "auto",
+			top: bottom ? "auto" : y + "px",
+			bottom: bottom ? y + "px" : "auto",
+		});
+	}
+
+	async function applyButtonPosition(button) {
+		let saved = await load(STORAGE.position, null);
+
+		if (!saved || !(saved.corner || (Number.isFinite(saved.x) && Number.isFinite(saved.y)))) {
+			button._placement = null;
+			pinButtonStyle(button, {
+				left: null,
+				bottom: null,
+				top: "16px",
+				right: "16px",
+			});
 			return;
 		}
 
-		const { x, y } = clampButtonToViewport(button, saved.x, saved.y);
+		if (!saved.corner) {
+			const { x, y } = clampButtonToViewport(button, saved.x, saved.y);
 
-		pinButtonStyle(button, { left: x + "px", top: y + "px", right: "auto" });
+			pinButtonStyle(button, {
+				left: x + "px",
+				top: y + "px",
+				right: "auto",
+				bottom: "auto",
+			});
+			saved = buttonCornerPlacement(button);
+			save(STORAGE.position, saved);
+		}
+
+		button._placement = saved;
+		pinButtonPlacement(button, saved);
 	}
 
 	const BUTTON_MOVE_EVENT = "hnewhere:buttonmove";
@@ -10855,13 +11333,12 @@ html[data-backchannel-installed] .chin {
 		};
 
 		const clampPosition = () => {
-			const { x, y } = clampButtonToViewport(
-				button,
-				button.offsetLeft,
-				button.offsetTop,
-			);
+			if (dragging) return;
 
-			pinButtonStyle(button, { left: x + "px", top: y + "px", right: "auto" });
+			if (button._placement) {
+				pinButtonPlacement(button, button._placement);
+			}
+
 			notifyMoved();
 		};
 
@@ -10874,10 +11351,8 @@ html[data-backchannel-installed] .chin {
 			startX = event.clientX;
 			startY = event.clientY;
 
-			const rect = button.getBoundingClientRect();
-
-			startLeft = rect.left;
-			startTop = rect.top;
+			startLeft = button.offsetLeft;
+			startTop = button.offsetTop;
 
 			button.setPointerCapture(event.pointerId);
 		});
@@ -10898,7 +11373,12 @@ html[data-backchannel-installed] .chin {
 				startTop + deltaY,
 			);
 
-			pinButtonStyle(button, { left: x + "px", top: y + "px", right: "auto" });
+			pinButtonStyle(button, {
+				left: x + "px",
+				top: y + "px",
+				right: "auto",
+				bottom: "auto",
+			});
 			notifyMoved();
 		});
 
@@ -10910,10 +11390,9 @@ html[data-backchannel-installed] .chin {
 			if (moved) {
 				suppressClick = true;
 
-				save(STORAGE.position, {
-					x: button.offsetLeft,
-					y: button.offsetTop,
-				});
+				button._placement = buttonCornerPlacement(button);
+				save(STORAGE.position, button._placement);
+				pinButtonPlacement(button, button._placement);
 
 				requestAnimationFrame(() => {
 					suppressClick = false;
@@ -11479,7 +11958,7 @@ html[data-backchannel-installed] .chin {
 		}
 
 		if (Date.now() - (pending.at || 0) > PENDING_FOCUS_TTL) {
-			await save(STORAGE.pendingFocus, null);
+			await forget(STORAGE.pendingFocus);
 			return;
 		}
 
@@ -11491,7 +11970,7 @@ html[data-backchannel-installed] .chin {
 			return;
 		}
 
-		await save(STORAGE.pendingFocus, null);
+		await forget(STORAGE.pendingFocus);
 		applyCommentFocus(pending.commentKey);
 	}
 
@@ -13293,11 +13772,11 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	}
 
 	function pulseFloatingButtonFeedback(button, text) {
-		button.textContent = text;
 		pinButtonStyle(button, { fontSize: "11px", color: "white" });
+		setButtonLabel(button, text);
 
 		window.setTimeout(() => {
-			button.textContent = buttonMarkPreference;
+			setButtonLabel(button, buttonMarkPreference);
 			applyButtonMobileStyle(button);
 		}, 900);
 	}
@@ -15829,6 +16308,21 @@ header > .settings-panel {
 	font-variant-numeric:tabular-nums;
 }
 
+.discussion-thread-link {
+	color:inherit;
+	text-decoration:underline dotted;
+	text-underline-offset:2px;
+	text-decoration-color:var(--border);
+}
+
+.source-menu .source-menu-hint {
+	margin:-1.5px 0 0 25px;
+}
+
+.source-menu .source-menu-hint + .source-menu-option {
+	margin-top:5px;
+}
+
 .source-menu-option-active .choice-label {
 	font-weight:600;
 }
@@ -16094,7 +16588,8 @@ header > .settings-panel {
 	margin-top:10px;
 }
 
-.source-picker-save {
+.source-picker-save,
+#settings-cache-clear {
 	font:600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 	padding:5px 10px;
 	border-radius:4px;
@@ -16104,7 +16599,14 @@ header > .settings-panel {
 	color:white;
 }
 
-.source-picker-save:disabled {
+#settings-cache-clear {
+	border-color:var(--button-border);
+	background:var(--button-bg);
+	color:var(--button-text);
+}
+
+.source-picker-save:disabled,
+#settings-cache-clear[aria-disabled="true"] {
 	opacity:.6;
 	cursor:default;
 }
@@ -17128,8 +17630,31 @@ button.shortcut-key {
 	white-space:nowrap;
 	cursor:grab;
 	touch-action:none;
-	transition:background .2s ease, box-shadow .2s ease, width .15s ease, height .15s ease, border-radius .15s ease;
+	transition:background .2s ease, box-shadow .2s ease, width .15s ease, height .15s ease, margin .15s ease, border-radius .15s ease, transform .15s ease;
 	z-index:3;
+}
+
+.toggle-preview.is-small .toggle-preview-mark {
+	visibility:hidden;
+}
+
+.toggle-preview.is-small:hover,
+.toggle-preview.is-small:focus-within {
+	width:var(--grown) !important;
+	height:var(--grown) !important;
+	margin:var(--grow-margin);
+	z-index:6;
+}
+
+.toggle-preview.is-empty:hover,
+.toggle-preview.is-empty:focus-within {
+	transform:scale(var(--grow));
+	z-index:6;
+}
+
+.toggle-preview.is-small:hover .toggle-preview-mark,
+.toggle-preview.is-small:focus-within .toggle-preview-mark {
+	visibility:visible;
 }
 
 .toggle-preview.is-dragging {
@@ -17173,6 +17698,11 @@ button.shortcut-key {
 	height:10px;
 	border-radius:50%;
 	cursor:crosshair;
+}
+
+.toggle-selection.is-compact .toggle-handle-radius {
+	top:-6px;
+	right:-6px;
 }
 
 .toggle-tags {
@@ -17219,6 +17749,33 @@ button.shortcut-key {
 .toggle-tag input:focus {
 	outline:none;
 	background:rgba(255,255,255,.24);
+}
+
+.toggle-tag-switch {
+	position:relative;
+	box-sizing:border-box;
+	justify-content:center;
+	width:18px;
+	padding:0;
+	border:0;
+	font-family:inherit;
+	line-height:1;
+	cursor:pointer;
+}
+
+.toggle-tag-switch .toggle-tag-slash {
+	position:absolute;
+	inset:0;
+	margin:0;
+}
+
+.toggle-tag-switch[aria-pressed="true"] .toggle-tag-slash {
+	display:none;
+}
+
+.toggle-tag-switch:focus-visible {
+	outline:2px solid var(--toggle-select);
+	outline-offset:2px;
 }
 
 .toggle-preview:focus-visible,
@@ -17674,12 +18231,18 @@ All stored locally.
 <div class="toggle-page-copy" aria-hidden="true"><div class="toggle-page-head"></div><div class="toggle-page-line" style="width:96%"></div><div class="toggle-page-line" style="width:88%"></div><div class="toggle-page-line" style="width:93%"></div><div class="toggle-page-line" style="width:72%"></div><div class="toggle-page-line" style="width:90%"></div><div class="toggle-page-line" style="width:84%"></div><div class="toggle-page-line" style="width:91%"></div><div class="toggle-page-line" style="width:78%"></div><div class="toggle-page-line" style="width:89%"></div><div class="toggle-page-line" style="width:82%"></div><div class="toggle-page-line" style="width:94%"></div><div class="toggle-page-line" style="width:70%"></div></div>
 <div id="toggle-preview" class="toggle-preview" tabindex="0" role="group" aria-label="Sidebar toggle preview. Drag it, or use the arrow keys, to see it elsewhere on a page."><span id="toggle-preview-mark" class="toggle-preview-mark" contenteditable="plaintext-only" spellcheck="false" role="textbox" aria-label="Toggle label, one or two characters" title="Type one or two characters">BC</span></div>
 <div class="toggle-selection"><span id="toggle-radius-handle" class="toggle-handle toggle-handle-radius" role="slider" tabindex="0" aria-label="Corner radius" aria-valuemin="0" aria-valuemax="${BUTTON_RADIUS_MAX}"></span><span id="toggle-size-handle" class="toggle-handle toggle-handle-size" role="slider" tabindex="0" aria-label="Toggle size" aria-valuemin="${BUTTON_SIZE_MIN}" aria-valuemax="${BUTTON_SIZE_MAX}"></span></div>
-<div class="toggle-tags"><label class="toggle-tag"><input id="button-size-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Toggle size in pixels" value="44"><span>px</span></label><label class="toggle-tag"><svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true" focusable="false"><path d="M1.5 8.5V5.5a4 4 0 0 1 4-4h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><input id="button-radius-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Corner radius in percent" value="50"><span>%</span></label></div>
+<div class="toggle-tags"><label class="toggle-tag"><input id="button-size-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Toggle size in pixels" value="44"><span>px</span></label><label class="toggle-tag"><svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true" focusable="false"><path d="M1.5 8.5V5.5a4 4 0 0 1 4-4h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><input id="button-radius-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Corner radius in percent" value="50"><span>%</span></label><button type="button" id="button-mark-toggle" class="toggle-tag toggle-tag-switch" tabindex="0" aria-pressed="true" aria-label="Show text on the toggle" title="Show text on the toggle"><span>Aa</span><svg class="toggle-tag-slash" viewBox="0 0 18 18" width="18" height="18" aria-hidden="true" focusable="false" fill="none" stroke-linecap="round"><path d="M3.5 14.5 14.5 3.5" stroke="var(--toggle-select)" stroke-width="4"/><path d="M3.5 14.5 14.5 3.5" stroke="currentColor" stroke-width="1.4"/></svg></button></div>
 </div>
 </div>
 </div>
 </div>
 </div>
+</div>
+
+<div class="settings-group">
+<div class="sources-subhead">Cached data</div>
+<div class="sources-subhint">Clear temporary data used to find discussions and load Front Pages. Backchannel fetches fresh results when needed, without affecting your Notes, Collection, or settings.</div>
+<button id="settings-cache-clear" type="button">Clear cache</button>
 </div>
 
 <div class="settings-group">
@@ -17768,6 +18331,7 @@ ${frontPageChooserHTML()}
 		const radiusHandle = shadow.querySelector("#toggle-radius-handle");
 		const sizeInput = shadow.querySelector("#button-size-input");
 		const radiusInput = shadow.querySelector("#button-radius-input");
+		const markSwitch = shadow.querySelector("#button-mark-toggle");
 		const colorInput = shadow.querySelector("#button-color-input");
 		const anySwatch = shadow.querySelector(".toggle-swatch-any");
 		const swatches = [...settingsPanel.querySelectorAll(".toggle-swatch[data-accent]")];
@@ -17878,15 +18442,34 @@ ${frontPageChooserHTML()}
 				previewMark.textContent = normalizeButtonMark(settings.buttonMark);
 			}
 
+			const markText = normalizeButtonMark(settings.buttonMark);
+			const fit = buttonLabelFit(markText, radius, buttonFontSizeFor(size));
+			const growRight = width - previewSpot.right - size / 2 > width / 2;
+			const growBottom = previewSpot.top + size / 2 > height / 2;
+
+			preview.classList.toggle("is-small", fit > size);
+			preview.classList.toggle("is-empty", !markText);
+			markSwitch.setAttribute("aria-pressed", String(Boolean(markText)));
+			preview.style.setProperty("--grow", String((size + 4) / size));
+			const nudge = buttonGrowNudge(size, fit, radius);
+
+			preview.style.setProperty("--grown", `${fit}px`);
+			preview.style.setProperty(
+				"--grow-margin",
+				`${growBottom ? size - fit + nudge : -nudge}px ${growRight ? -nudge : size - fit + nudge}px 0 0`,
+			);
+
 			previewSelection.style.right = `${previewSpot.right - pad}px`;
 			previewSelection.style.top = `${previewSpot.top - pad}px`;
 			previewSelection.style.width = `${box}px`;
 			previewSelection.style.height = `${box}px`;
 
 			const inset = Math.min(5 + (radius / 100) * size * 0.5, size / 2 - 2);
+			const compact = size < 20;
 
-			radiusHandle.style.left = `${pad + inset - 6.5}px`;
-			radiusHandle.style.bottom = `${pad + inset - 6.5}px`;
+			previewSelection.classList.toggle("is-compact", compact);
+			radiusHandle.style.left = compact ? "" : `${pad + inset - 6.5}px`;
+			radiusHandle.style.bottom = compact ? "" : `${pad + inset - 6.5}px`;
 			sizeHandle.setAttribute("aria-valuenow", String(size));
 			radiusHandle.setAttribute("aria-valuenow", String(radius));
 
@@ -18008,6 +18591,7 @@ ${frontPageChooserHTML()}
 			if (open) {
 				setHideMenuOpen(false);
 				refreshNotesCount?.().catch(console.error);
+				settingsPanel.dispatchEvent(new Event("general-shown"));
 				refreshManageLists().catch(console.error);
 			}
 
@@ -18109,6 +18693,32 @@ ${frontPageChooserHTML()}
 		};
 
 		refreshNotesCount().catch(console.error);
+
+		const cacheClear = shadow.querySelector("#settings-cache-clear");
+
+		const resetCacheClear = () => {
+			if (cacheClear) {
+				cacheClear.textContent = "Clear cache";
+				cacheClear.removeAttribute("aria-disabled");
+			}
+		};
+
+		settingsPanel.addEventListener("general-shown", resetCacheClear);
+
+		if (cacheClear) {
+			cacheClear.onclick = async (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+
+				if (cacheClear.getAttribute("aria-disabled") === "true") {
+					return;
+				}
+
+				cacheClear.setAttribute("aria-disabled", "true");
+				await clearCache();
+				cacheClear.textContent = "Cache cleared";
+			};
+		}
 
 		if (notesExport) {
 			notesExport.onclick = (event) => {
@@ -18280,6 +18890,26 @@ ${frontPageChooserHTML()}
 				}
 			});
 
+			previewMark.addEventListener("input", () => {
+				markSwitch.setAttribute("aria-pressed", String(Boolean(previewMark.textContent.trim())));
+			});
+
+			markSwitch.addEventListener("click", () => {
+				saveDesigner({
+					buttonMark: normalizeButtonMark(designerSettings.buttonMark) ? "" : BUTTON_MARK_DEFAULT,
+				}).catch(console.error);
+			});
+
+			markSwitch.addEventListener("keydown", (event) => {
+				if (event.key !== "Tab" && event.key !== "Escape") {
+					event.stopPropagation();
+				}
+
+				if (event.key === "Backspace") {
+					event.preventDefault();
+				}
+			});
+
 			previewMark.addEventListener("blur", () => {
 				commitMark().catch(console.error);
 			});
@@ -18305,7 +18935,7 @@ ${frontPageChooserHTML()}
 					right: previewSpot.right,
 					top: previewSpot.top,
 					moved: false,
-					onMark: event.target === previewMark,
+					onMark: event.target === previewMark || !previewMark.textContent,
 				};
 				preview.setPointerCapture(event.pointerId);
 			});
@@ -18419,7 +19049,12 @@ ${frontPageChooserHTML()}
 			}));
 
 			dragHandle(radiusHandle, (dx, dy, start) => ({
-				radius: normalizeButtonRadius(start.radius + ((dx - dy) / start.size) * 100),
+				radius: normalizeButtonRadius(
+					start.radius +
+						(previewSelection.classList.contains("is-compact") ? -1 : 1) *
+							((dx - dy) / Math.max(start.size, 24)) *
+							100,
+				),
 			}));
 
 			sizeHandle.addEventListener("keydown", (event) => {
@@ -19663,15 +20298,16 @@ ${SUBMIT_FORM_CSS}
 	align-items:center;
 	align-self:stretch;
 	padding-top:1px;
+	cursor:pointer;
+}
+
+.comment-vote-slot > .vote-controls {
+	cursor:default;
 }
 
 .comment-vote-slot.comment-vote-slot-empty {
 	flex-basis:var(--vote-gutter);
 	width:var(--vote-gutter);
-}
-
-.comment-vote-slot.comment-vote-slot-empty::after {
-	display:none;
 }
 
 .comment-vote-slot::after {
@@ -19702,6 +20338,13 @@ ${SUBMIT_FORM_CSS}
 
 #comments .top-level-comments > .comment:not(.comment ~ .comment) {
 	margin-top:12px;
+}
+
+@media (hover: hover) {
+	.comment > .comment-layout > .comment-vote-slot:hover:not(:has(> .vote-controls:hover))::after {
+		background:var(--muted);
+		transition-duration:.12s;
+	}
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -19931,7 +20574,9 @@ blockquote.comment-quote-redundant {
 
 .story-title a {
 	color:var(--text);
-	text-decoration:none;
+	text-decoration:underline dotted;
+	text-underline-offset:2px;
+	text-decoration-color:var(--border);
 	word-break:break-word;
 }
 
@@ -19951,6 +20596,8 @@ blockquote.comment-quote-redundant {
 
 @media (hover: hover) {
 	.story-meta a:hover,
+	.story-title a:hover,
+	.discussion-thread-link:hover,
 	.browse-nav-link:hover {
 		text-decoration:underline;
 	}
@@ -20913,6 +21560,18 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			?.setAttribute("aria-expanded", "false");
 	}
 
+	function fitSourceMenuToRoom(menu) {
+		requestAnimationFrame(() => {
+			if (menu.classList.contains("hidden")) {
+				return;
+			}
+
+			const room = menu.getRootNode().querySelector("#panel").getBoundingClientRect().bottom - menu.getBoundingClientRect().top - 12;
+
+			menu.style.maxHeight = `${Math.max(160, Math.floor(room))}px`;
+		});
+	}
+
 	function closeMenusOutside(shadow, event) {
 		const path = event.composedPath();
 		const outside = (node) => node && !path.includes(node);
@@ -21493,7 +22152,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			clearTimeout(saveTimer);
 
 			saveTimer = window.setTimeout(() => {
-				save(draftKey, textarea.value).catch(console.error);
+				(textarea.value ? save(draftKey, textarea.value) : forget(draftKey)).catch(console.error);
 			}, 400);
 		});
 
@@ -21540,7 +22199,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 
 					textarea.value = "";
 					clearTimeout(saveTimer);
-					await save(draftKey, null);
+					await forget(draftKey);
 
 					settleComposeSend(submitButton, "posted");
 
@@ -22255,6 +22914,42 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 
 			await toggleCollapsed(comment.key, hidden);
 		};
+
+		const column = div.querySelector(":scope > .comment-layout > .comment-vote-slot");
+		const meta = div.querySelector(":scope > .comment-layout > .comment-main > .meta");
+		let pressedAt = null;
+
+		column.addEventListener("click", (event) => {
+			if (!event.target.closest(".vote-controls")) {
+				toggle.click();
+			}
+		});
+
+		meta.addEventListener("pointerdown", (event) => {
+			pressedAt = { x: event.clientX, y: event.clientY };
+		});
+
+		meta.addEventListener("click", (event) => {
+			const moved = pressedAt && Math.hypot(event.clientX - pressedAt.x, event.clientY - pressedAt.y) > 4;
+			const selected = (div.getRootNode().getSelection?.() || document.getSelection())?.toString().trim();
+
+			pressedAt = null;
+
+			if (
+				moved ||
+				selected ||
+				event.detail > 1 ||
+				event.metaKey ||
+				event.ctrlKey ||
+				event.shiftKey ||
+				event.altKey ||
+				event.target.closest("a, button, input, label, .toggle, .vote-controls")
+			) {
+				return;
+			}
+
+			toggle.click();
+		});
 
 		const replyButton = div.querySelector(".reply-link");
 		const editNoteButton = div.querySelector(".edit-note-link");
@@ -23106,6 +23801,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 
 			menu.classList.remove("hidden");
 			disclosure.setAttribute("aria-expanded", "true");
+			fitSourceMenuToRoom(menu);
 		};
 
 		setMenuOpen(false);
@@ -23217,18 +23913,6 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 		}
 
 		menu.querySelector(".choice-head .live-pill")?.closest(".choice-group")?.classList.add("app-live-group");
-
-		disclosure.addEventListener("click", () => {
-			requestAnimationFrame(() => {
-				if (menu.classList.contains("hidden")) {
-					return;
-				}
-
-				const room = shadow.querySelector("#panel").getBoundingClientRect().bottom - menu.getBoundingClientRect().top - 12;
-
-				menu.style.maxHeight = `${Math.max(160, Math.floor(room))}px`;
-			});
-		});
 
 		const arrow = document.createElement("span");
 
@@ -23351,17 +24035,29 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			.join("");
 	}
 
+	function discussionHintHTML(story, count) {
+		const text = escapeHTML(pluralize(count ?? 0, "comment"));
+		const href = discussionURL(story);
+		const label = `Open this discussion on ${sourceShortLabel(story)}`;
+
+		return `<div class="settings-option-hint source-menu-hint">${
+			href
+				? `<a class="discussion-thread-link" href="${escapeHTML(href)}" target="_blank" rel="noopener" title="${escapeHTML(label)}">${text}</a>`
+				: text
+		}</div>`;
+	}
+
 	function sourceMenuHTML(stories) {
 		const name = `source-menu-${(sourceMenuSeq += 1)}`;
-		const option = (key, about) => `
+		const option = (key, about, story = null) => `
 <label class="settings-option source-menu-option"${key ? ` data-discussion-key="${escapeHTML(key)}"` : ""}>${discussionChoiceHTML(
 			`<input type="radio" name="${name}"${key ? "" : " checked"}>`,
-			about,
-		)}</label>`;
+			{ ...about, count: null },
+		)}</label>${story ? discussionHintHTML(story, about.count) : ""}`;
 
 		return `<div class="source-menu hidden" id="source-menu" role="menu">
 <div class="choice-group">${option("", { label: "All sources" })}</div>
-${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about))}
+${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about, story))}
 </div>`;
 	}
 
@@ -30684,6 +31380,14 @@ ${SETTINGS_MODAL_CSS}
 	min-width:0;
 }
 
+#panel.app-docked .app-discussion-meta .source-menu-hint {
+	margin:1.5px 0 0 23px;
+}
+
+#panel.app-docked .app-discussion-meta .source-menu-hint + .source-menu-option {
+	margin-top:8px;
+}
+
 #panel.app-docked .app-discussion-meta .choice-group + .choice-group {
 	margin-top:10px;
 	padding-top:10px;
@@ -33224,6 +33928,10 @@ ${settingsModalHTML()}
 			}
 
 			content.scrollTop = 0;
+
+			if (tab.dataset.settingsSection === "general") {
+				panel.dispatchEvent(new Event("general-shown"));
+			}
 
 			const place = target && shadow.querySelector(target);
 
@@ -36287,7 +36995,7 @@ ${frontPageChooserHTML()}
 				return;
 			}
 
-			await save(STORAGE.readOut, null);
+			await forget(STORAGE.readOut);
 
 			const reader = record.article ? readerFromStored(record.article, article.url) : null;
 
@@ -38378,7 +39086,7 @@ ${frontPageChooserHTML()}
 		let last = storedLast;
 
 		if (last && Date.now() - last.timestamp > 300000) {
-			await save(STORAGE.last, null);
+			await forget(STORAGE.last);
 			last = null;
 		}
 
@@ -38391,7 +39099,7 @@ ${frontPageChooserHTML()}
 		const arrivedForComments = arrivedFromClick && Boolean(last.openPanel);
 
 		if (arrivedFromClick) {
-			await save(STORAGE.last, null);
+			await forget(STORAGE.last);
 		}
 
 		const found = await discoverAll(pageAddresses(), settings);
@@ -38461,6 +39169,7 @@ ${frontPageChooserHTML()}
 
 	if (window.top === window.self) {
 		init().catch(console.error);
+		scheduleStorageSweep();
 	} else {
 		installFrameAgent();
 	}
