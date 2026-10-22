@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.17.2
+// @version      1.6.17.3
 // @license      MIT
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
 // @downloadURL  https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -527,6 +527,7 @@
 	let opening = false;
 	let openingRun = null;
 	let sidebarGeneration = 0;
+	let discussionRenderRun = 0;
 	let renderedComments = [];
 	const sidebarSourceKeys = new Set();
 	const liveDiscussions = new Map();
@@ -2649,15 +2650,19 @@
 	const itemActionRequests = new Map();
 
 	async function getItem(id) {
-		if (itemCache.has(id)) {
-			return itemCache.get(id);
+		const key = String(id);
+
+		if (itemCache.has(key)) {
+			return itemCache.get(key);
 		}
 
 		const item = await request(
 			"https://hacker-news.firebaseio.com/v0/item/" + id + ".json",
 		);
 
-		itemCache.set(id, item);
+		if (item) {
+			itemCache.set(key, item);
+		}
 
 		return item;
 	}
@@ -4718,7 +4723,7 @@ ${
 	const REDDIT_TIER_TTL = 10 * 60 * 1000;
 	const REDDIT_RATE_FLOOR = 10;
 
-	let redditRateRemaining = Infinity;
+	let redditRateResumeAt = 0;
 
 	async function redditTier() {
 		const stored = await load(REDDIT_TIER_KEY, null);
@@ -4738,14 +4743,17 @@ ${
 		}
 
 		if (tier === "loid") {
-			if (redditRateRemaining < REDDIT_RATE_FLOOR) {
+			if (Date.now() < redditRateResumeAt) {
 				return null;
 			}
 
 			const result = await requestWithMeta("https://www.reddit.com" + path);
 
 			if (result.rateLimit) {
-				redditRateRemaining = result.rateLimit.remaining;
+				redditRateResumeAt =
+					result.rateLimit.remaining < REDDIT_RATE_FLOOR
+						? Date.now() + (result.rateLimit.resetSeconds || 600) * 1000
+						: 0;
 			}
 
 			if (result.ok) {
@@ -9539,6 +9547,19 @@ html[data-backchannel-installed] .chin {
 		return hash.toString();
 	}
 
+	function bindVoteStage(payload, staged) {
+		if (
+			staged?.kind !== "vote" ||
+			staged.storyID !== payload.storyID ||
+			staged.item !== payload.item ||
+			staged.action !== payload.action
+		) {
+			return null;
+		}
+
+		return { ...payload, origin: staged.origin, voteURL: staged.voteURL };
+	}
+
 	// #endregion hnewhere-test-export
 
 	async function postBridgeResult(source, payload, result) {
@@ -9880,11 +9901,18 @@ html[data-backchannel-installed] .chin {
 		const staged = action.stagesDraft
 			? await readBridgePayload(payload.nonce)
 			: null;
+		const bound = action.bindStaged
+			? action.bindStaged(payload, staged)
+			: payload;
+
+		if (!bound) {
+			return false;
+		}
 
 		await finishWriteAction(
 			action,
-			payload,
-			await runWriteAction(action, { payload, staged, root }),
+			bound,
+			await runWriteAction(action, { payload: bound, staged, root }),
 		);
 
 		return true;
@@ -9926,6 +9954,14 @@ html[data-backchannel-installed] .chin {
 	}
 
 	async function finishWriteAction(action, payload, result) {
+		if (
+			action.bindStaged &&
+			result !== BRIDGE_AWAITING_SIGN_IN &&
+			result !== BRIDGE_AWAITING_READER
+		) {
+			await clearBridgePayload(payload.nonce);
+		}
+
 		if (result === BRIDGE_NAVIGATED) {
 			return;
 		}
@@ -9980,15 +10016,19 @@ html[data-backchannel-installed] .chin {
 		const staged = action.stagesDraft
 			? await readBridgePayload(stored.payload.nonce)
 			: null;
-		const result = await runWriteAction(action, {
-			payload: stored.payload,
-			staged,
-			root,
-		});
+		const payload = action.bindStaged
+			? action.bindStaged(stored.payload, staged)
+			: stored.payload;
+
+		if (!payload) {
+			return false;
+		}
+
+		const result = await runWriteAction(action, { payload, staged, root });
 
 		if (resumeShouldWait(result)) {
 			showSignInNote(action);
-			await postWriteResult(action, stored.payload, {
+			await postWriteResult(action, payload, {
 				ok: false,
 				reason: "awaiting-sign-in",
 				interim: true,
@@ -9997,7 +10037,7 @@ html[data-backchannel-installed] .chin {
 		}
 
 		clearBridgeReload(RESUME_BRIDGE_STORAGE_KEY);
-		await finishWriteAction(action, stored.payload, result);
+		await finishWriteAction(action, payload, result);
 		return true;
 	}
 
@@ -10595,10 +10635,13 @@ html[data-backchannel-installed] .chin {
 			return await cached;
 		}
 
+		let fetchFailed = false;
+
 		const promise = (async () => {
 			const html = await requestText(commentURL(storyID));
 
 			if (!html) {
+				fetchFailed = true;
 				return new Map();
 			}
 
@@ -10620,7 +10663,13 @@ html[data-backchannel-installed] .chin {
 
 		try {
 			const voteLinks = await promise;
-			voteLinkCache.set(cacheKey, voteLinks);
+
+			if (fetchFailed) {
+				voteLinkCache.delete(cacheKey);
+			} else {
+				voteLinkCache.set(cacheKey, voteLinks);
+			}
+
 			return voteLinks;
 		} catch {
 			voteLinkCache.delete(cacheKey);
@@ -10803,6 +10852,7 @@ html[data-backchannel-installed] .chin {
 				return;
 			}
 
+			clearBridgePayload(data.nonce).catch(() => {});
 			settleItemAction(data.nonce, data);
 	}
 
@@ -10847,12 +10897,28 @@ html[data-backchannel-installed] .chin {
 			nonce,
 		});
 		const popup = window.open(
-			url,
+			"about:blank",
 			"hnewhere_vote_bridge_" + nonce,
 			"width=420,height=320,resizable=yes,scrollbars=yes",
 		);
 
-		return new Promise((resolve) => {
+		return (async () => {
+			try {
+				await stageBridgePayload(nonce, {
+					kind: "vote",
+					storyID: String(storyID),
+					item: String(itemId),
+					action,
+					voteURL: voteURL || null,
+					origin: location.origin,
+				});
+				await indexBridgePayload(nonce);
+			} catch (error) {
+				console.error("HNewhere: could not stage vote", error);
+				popup?.close();
+				return { ok: false, reason: "bridge-failed" };
+			}
+
 			if (!popup) {
 				itemActionRequests.set(nonce, {
 					resolve: () => {},
@@ -10865,24 +10931,31 @@ html[data-backchannel-installed] .chin {
 					onInterim,
 					stopWatching: watchBridgeResult(nonce, deliverItemAction),
 				});
-				resolve({ ok: false, reason: "popup-blocked", url });
-				return;
+				return { ok: false, reason: "popup-blocked", url };
 			}
 
-			const timeoutId = window.setTimeout(
-				() => settleItemAction(nonce, { ok: false, reason: "timeout" }),
-				12000,
-			);
+			return new Promise((resolve) => {
+				const timeoutId = window.setTimeout(
+					() => settleItemAction(nonce, { ok: false, reason: "timeout" }),
+					12000,
+				);
 
-			itemActionRequests.set(nonce, {
-				resolve,
-				timeoutId,
-				popup,
-				origin: bridge.origin,
-				stopWatching: watchBridgeResult(nonce, deliverItemAction),
-				onInterim,
+				itemActionRequests.set(nonce, {
+					resolve,
+					timeoutId,
+					popup,
+					origin: bridge.origin,
+					stopWatching: watchBridgeResult(nonce, deliverItemAction),
+					onInterim,
+				});
+
+				try {
+					popup.location = url;
+				} catch (error) {
+					console.error("HNewhere: could not navigate vote popup", error);
+				}
 			});
-		});
+		})();
 	}
 
 	function sayVote(container, itemId, message, action = null) {
@@ -13050,8 +13123,12 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		await paintCollectionTag(context.ui, context.stories, context.seenTimes);
 	}
 
-	async function renderCollectionView(ui, list) {
+	async function renderCollectionView(ui, list, isCurrent = () => true) {
 		const documents = await loadCollectionDocuments();
+
+		if (!isCurrent()) {
+			return;
+		}
 
 		list.replaceChildren();
 
@@ -13502,8 +13579,13 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		return body;
 	}
 
-	async function renderQueueView(ui, list) {
+	async function renderQueueView(ui, list, isCurrent = () => true) {
 		const entries = sortQueue(await loadQueue());
+
+		if (!isCurrent()) {
+			return;
+		}
+
 		const reload = () => renderQueueView(ui, list);
 		let rank = 0;
 
@@ -22172,6 +22254,8 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			const toStory = aim.storyID ?? storyID;
 			const text = textarea.value;
 			const label = getSource(toSource)?.label || "the source";
+			const shownUI = sidebarUI;
+			const shownDiscussions = renderedDiscussions;
 
 			if (!text.trim()) {
 				setStatus("Write something first.", { error: true });
@@ -22205,7 +22289,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 
 					window.setTimeout(() => {
 						onPosted?.();
-						reloadDiscussion(toStory);
+						reloadDiscussion(shownUI, shownDiscussions);
 					}, 1400);
 				} finally {
 					setBusy(false);
@@ -22287,10 +22371,16 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 	}
 	// #endregion hnewhere-test-export
 
-	function reloadDiscussion(storyID) {
+	function reloadDiscussion(ui, stories) {
 		itemCache.clear();
 
-		openSidebar([{ objectID: String(storyID) }]).catch(console.error);
+		if (!ui || !stories.length || ui !== sidebarUI || stories !== renderedDiscussions) {
+			return;
+		}
+
+		forgetThreads(stories);
+		setSidebarStage(ui, "comments");
+		renderDiscussions(stories, ui).catch(console.error);
 	}
 
 	function mountFilterBanner(afterElement, ui) {
@@ -23134,6 +23224,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 	}
 
 	async function renderDiscussions(stories, ui, { arrival = true } = {}) {
+		const run = ++discussionRenderRun;
 		const docked = dockedComposeBox(ui.shadow);
 		const kept = docked && stories.some((story) => story.key === docked._hnewhereStoryKey) ? docked : null;
 
@@ -23191,7 +23282,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			),
 		);
 
-		if (generation !== sidebarGeneration) {
+		if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 			return;
 		}
 
@@ -23280,7 +23371,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 		await learnOpenPage().catch(console.error);
 		await loadOpenCollectedDocument();
 
-		if (generation !== sidebarGeneration) {
+		if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 			return;
 		}
 
@@ -23298,7 +23389,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 				const thread = notesThread(notesDiscussion);
 
 				for (const key of thread.rootKeys) {
-					if (generation !== sidebarGeneration) {
+					if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 						return;
 					}
 
@@ -23353,7 +23444,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 		const batchSize = 5;
 
 		for (let i = 0; i < entries.length; i += batchSize) {
-			if (generation !== sidebarGeneration) {
+			if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 				return;
 			}
 
@@ -23366,7 +23457,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			);
 
 			for (const entry of batch) {
-				if (generation !== sidebarGeneration) {
+				if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 					return;
 				}
 
@@ -23428,7 +23519,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 				continue;
 			}
 
-			if (generation !== sidebarGeneration) {
+			if (generation !== sidebarGeneration || run !== discussionRenderRun) {
 				return;
 			}
 
@@ -23440,7 +23531,7 @@ ${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMo
 			hydrateDisplayAges(story.id);
 		}
 
-		if (generation === sidebarGeneration) {
+		if (generation === sidebarGeneration && run === discussionRenderRun) {
 			clearSidebarStage(ui);
 		}
 	}
@@ -24464,7 +24555,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 		};
 	}
 
-	function actHNItemAction({ payload, root }) {
+	async function actHNItemAction({ payload, root }) {
 		const before = currentVoteInfoFor(root, payload.item);
 
 		const anchor = root.getElementById(payload.action + "_" + payload.item);
@@ -24491,6 +24582,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 			return { ok: false, reason: "storage-unavailable", voteInfo: before };
 		}
 
+		await clearBridgePayload(payload.nonce);
 		location.href = target.href;
 		return BRIDGE_NAVIGATED;
 	}
@@ -24758,6 +24850,8 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 				messageSource: ITEM_ACTION_BRIDGE_MESSAGE_SOURCE,
 				noun: "vote",
 				fields: ["item", "action", "voteURL"],
+				stagesDraft: true,
+				bindStaged: bindVoteStage,
 				accepts: (payload) =>
 					Boolean(payload.storyID && payload.item) &&
 					VOTE_ACTIONS.includes(payload.action),
@@ -25011,6 +25105,8 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 				messageSource: ITEM_ACTION_BRIDGE_MESSAGE_SOURCE,
 				noun: "vote",
 				fields: ["item", "action", "voteURL"],
+				stagesDraft: true,
+				bindStaged: bindVoteStage,
 				accepts: (payload) =>
 					Boolean(payload.storyID && payload.item) &&
 					VOTE_ACTIONS.includes(payload.action),
@@ -26528,6 +26624,26 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 		return host;
 	}
 
+	function pdfReaderRedrawing() {
+		const reader = ownPdfReader;
+
+		if (!reader) {
+			return false;
+		}
+
+		const view = reader.host.getBoundingClientRect();
+
+		return reader.pages.some((box) => {
+			const rect = box.getBoundingClientRect();
+
+			return (
+				rect.bottom > view.top - 400 &&
+				rect.top < view.bottom + 400 &&
+				!box.querySelector(".endOfContent")
+			);
+		});
+	}
+
 	async function drawPdfReaderVisiblePages() {
 		const reader = ownPdfReader;
 
@@ -26566,6 +26682,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 		}
 
 		reader.scale = next;
+		reader.generation += 1;
 		reader.viewer.style.setProperty("--scale-factor", String(next));
 		reader.viewer.style.setProperty("--total-scale-factor", String(next));
 		reader.drawn.clear();
@@ -26577,9 +26694,9 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 		}
 
 		reader.host.scrollTop = held * reader.viewer.scrollHeight;
-		reader.bus.dispatch("scalechanging", { scale: next, source: reader.app });
-
 		await drawPdfReaderVisiblePages();
+
+		reader.bus.dispatch("scalechanging", { scale: next, source: reader.app });
 	}
 
 	function reportPdfReaderFailure(error) {
@@ -26671,12 +26788,15 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 			return;
 		}
 
+		const generation = reader.generation;
+		const stale = () => ownPdfReader !== reader || reader.generation !== generation;
+
 		reader.drawn.add(number);
 
 		const box = reader.pages[number - 1];
 		const page = await reader.app.pdfDocument.getPage(number);
 
-		if (ownPdfReader !== reader || !box) {
+		if (stale() || !box) {
 			return;
 		}
 
@@ -26696,7 +26816,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 
 		await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
 
-		if (ownPdfReader !== reader) {
+		if (stale()) {
 			return;
 		}
 
@@ -26710,7 +26830,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 			viewport,
 		}).render();
 
-		if (ownPdfReader !== reader) {
+		if (stale()) {
 			return;
 		}
 
@@ -26865,6 +26985,7 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 			scale,
 			fitScale: scale,
 			drawn: new Set(),
+			generation: 0,
 			observer: null,
 			stopZoom: null,
 		};
@@ -29409,8 +29530,9 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 
 		const articleIndex = buildArticleTextIndex();
 		const groups = buildAnnotationGroups(renderedComments, articleIndex);
+		const redrawing = pdfReaderRedrawing();
 
-		if (!groups.length) {
+		if (!groups.length && !redrawing) {
 			clearCommentFilter({ animate: false });
 		}
 
@@ -29429,17 +29551,17 @@ ${discussionChoiceGroupsHTML(stories, (story, about) => option(story.key, about,
 			});
 		});
 
-		if (activeCommentFilter?.type === "quote") {
+		if (!redrawing && activeCommentFilter?.type === "quote") {
 			applyCommentFilter(activeCommentFilter.key, {
 				scroll: false,
 				animate: false,
 			});
-		} else if (activeCommentFilter?.type === "comment") {
+		} else if (!redrawing && activeCommentFilter?.type === "comment") {
 			applyCommentFocus(activeCommentFilter.id, {
 				scroll: false,
 				animate: false,
 			});
-		} else if (activeCommentFilter?.type === "discussion") {
+		} else if (!redrawing && activeCommentFilter?.type === "discussion") {
 			applyDiscussionFilter(activeCommentFilter.key, {
 				scroll: false,
 				animate: false,
@@ -35801,9 +35923,9 @@ ${frontPageChooserHTML()}
 		}
 
 		if (view === "queue") {
-			await renderQueueView(ui, list);
+			await renderQueueView(ui, list, () => request === state.listSeq);
 		} else if (view === "collection") {
-			await renderCollectionView(ui, list);
+			await renderCollectionView(ui, list, () => request === state.listSeq);
 		} else if (state.noSources) {
 			state.rows = [];
 			state.rowsByURL = new Map();
@@ -36040,7 +36162,9 @@ ${frontPageChooserHTML()}
 			return;
 		}
 
-		state.open = { url, key, row: entry };
+		const opened = { url, key, row: entry };
+
+		state.open = opened;
 		markCollectedArrival(url)
 			.then((marked) => {
 				if (marked) {
@@ -36080,10 +36204,18 @@ ${frontPageChooserHTML()}
 		const keys = rowDiscussionKeys(entry);
 		const previousSeen = keys.length ? await markManySeen(keys) : {};
 
+		if (state.open !== opened) {
+			return;
+		}
+
 		state.openSeen = previousSeen;
 
 		if (keys.length) {
 			await refreshAppSeen();
+
+			if (state.open !== opened) {
+				return;
+			}
 		}
 
 		await openAppDiscussion(entry, { focus, previousSeen });
